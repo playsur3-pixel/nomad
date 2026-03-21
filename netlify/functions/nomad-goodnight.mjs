@@ -40,7 +40,7 @@ async function discordFetch(path, options = {}) {
 }
 
 async function getGuildVoiceStates() {
-  return discordFetch(`/guilds/${GUILD_ID}/voice-states`);
+  return discordFetch(`/guilds/${GUILD_ID}/voice-states/${TARGET_USER_ID});
 }
 
 async function getRecentMessages(channelId, limit = 10) {
