@@ -1,12 +1,12 @@
 const DISCORD_API = "https://discord.com/api/v10";
 
 const GUILD_ID = process.env.DISCORD_GUILD_ID;
-const TARGET_USER_ID = "319045529373900800";
+const TARGET_USER_ID = "319045529373900800"; // nomad31770
 const TAVERNE_CHANNEL_ID = process.env.DISCORD_TAVERNE_CHANNEL_ID;
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 
 const GOODNIGHT_MESSAGE = "@everyone Bonne nuit tout le monde, à plus tard ! Bisous";
-const DUPLICATE_WINDOW_MS = 10 * 60 * 1000;
+const DUPLICATE_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 
 async function discordFetch(path, options = {}) {
   const url = `${DISCORD_API}${path}`;
@@ -24,22 +24,37 @@ async function discordFetch(path, options = {}) {
   const text = await res.text();
   console.log("Discord status:", res.status);
 
+  let data = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+  }
+
   if (!res.ok) {
+    const err = new Error(`Discord API ${res.status}: ${text}`);
+    err.status = res.status;
+    err.data = data;
     console.log("Discord error body:", text);
-    throw new Error(`Discord API ${res.status}: ${text}`);
+    throw err;
   }
 
-  if (!text) return null;
-
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
+  return data;
 }
 
 async function getUserVoiceState() {
-  return discordFetch(`/guilds/${GUILD_ID}/voice-states/${TARGET_USER_ID}`);
+  try {
+    return await discordFetch(`/guilds/${GUILD_ID}/voice-states/${TARGET_USER_ID}`);
+  } catch (error) {
+    // L'utilisateur n'est pas en vocal
+    if (error.status === 404 && error.data?.code === 10065) {
+      console.log("User is not in voice");
+      return null;
+    }
+    throw error;
+  }
 }
 
 async function getRecentMessages(channelId, limit = 10) {
@@ -57,6 +72,8 @@ async function sendMessage(channelId, content) {
 }
 
 function hasRecentlyPostedSameMessage(messages) {
+  if (!Array.isArray(messages)) return false;
+
   const now = Date.now();
 
   return messages.some((msg) => {
@@ -73,8 +90,12 @@ export default async () => {
     console.log("Function started");
 
     if (!BOT_TOKEN || !GUILD_ID || !TAVERNE_CHANNEL_ID) {
+      console.log("Missing env vars");
       return new Response(
-        JSON.stringify({ ok: false, error: "Variables d'environnement manquantes" }),
+        JSON.stringify({
+          ok: false,
+          error: "Variables d'environnement manquantes",
+        }),
         { status: 500 }
       );
     }
@@ -86,6 +107,7 @@ export default async () => {
     console.log("Is in voice:", isInVoice);
 
     if (isInVoice) {
+      console.log("Result: target_still_in_voice");
       return new Response(
         JSON.stringify({
           ok: true,
@@ -98,8 +120,13 @@ export default async () => {
     }
 
     const recentMessages = await getRecentMessages(TAVERNE_CHANNEL_ID, 10);
+    console.log(
+      "Recent messages fetched:",
+      Array.isArray(recentMessages) ? recentMessages.length : "not-array"
+    );
 
     if (hasRecentlyPostedSameMessage(recentMessages)) {
+      console.log("Result: duplicate_prevented");
       return new Response(
         JSON.stringify({
           ok: true,
@@ -111,6 +138,7 @@ export default async () => {
     }
 
     await sendMessage(TAVERNE_CHANNEL_ID, GOODNIGHT_MESSAGE);
+    console.log("Result: message_sent");
 
     return new Response(
       JSON.stringify({
