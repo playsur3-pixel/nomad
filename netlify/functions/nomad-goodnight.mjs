@@ -34,13 +34,12 @@ async function discordFetch(path, options = {}) {
   try {
     return JSON.parse(text);
   } catch {
-    console.log("Non-JSON response:", text);
     return text;
   }
 }
 
-async function getGuildVoiceStates() {
-  return discordFetch(`/guilds/${GUILD_ID}/voice-states/${TARGET_USER_ID});
+async function getUserVoiceState() {
+  return discordFetch(`/guilds/${GUILD_ID}/voice-states/${TARGET_USER_ID}`);
 }
 
 async function getRecentMessages(channelId, limit = 10) {
@@ -74,48 +73,33 @@ export default async () => {
     console.log("Function started");
 
     if (!BOT_TOKEN || !GUILD_ID || !TAVERNE_CHANNEL_ID) {
-      console.log("Missing env vars");
       return new Response(
         JSON.stringify({ ok: false, error: "Variables d'environnement manquantes" }),
         { status: 500 }
       );
     }
 
-    console.log("Env vars OK");
-    console.log("Guild ID:", GUILD_ID);
-    console.log("Target user:", TARGET_USER_ID);
-    console.log("Taverne channel:", TAVERNE_CHANNEL_ID);
+    const voiceState = await getUserVoiceState();
+    console.log("Voice state:", JSON.stringify(voiceState));
 
-    const voiceStates = await getGuildVoiceStates();
-    console.log("Voice states response:", JSON.stringify(voiceStates));
-
-    const targetState = Array.isArray(voiceStates)
-      ? voiceStates.find((vs) => String(vs.user_id) === TARGET_USER_ID)
-      : null;
-
-    console.log("Target state:", JSON.stringify(targetState));
-
-    const isInVoice = !!targetState?.channel_id;
+    const isInVoice = !!voiceState?.channel_id;
     console.log("Is in voice:", isInVoice);
 
     if (isInVoice) {
-      console.log("Result: target_still_in_voice");
       return new Response(
         JSON.stringify({
           ok: true,
           action: "none",
           reason: "target_still_in_voice",
-          channel_id: targetState.channel_id,
+          channel_id: voiceState.channel_id,
         }),
         { status: 200 }
       );
     }
 
     const recentMessages = await getRecentMessages(TAVERNE_CHANNEL_ID, 10);
-    console.log("Recent messages fetched:", Array.isArray(recentMessages) ? recentMessages.length : "not-array");
 
     if (hasRecentlyPostedSameMessage(recentMessages)) {
-      console.log("Result: duplicate_prevented");
       return new Response(
         JSON.stringify({
           ok: true,
@@ -127,7 +111,6 @@ export default async () => {
     }
 
     await sendMessage(TAVERNE_CHANNEL_ID, GOODNIGHT_MESSAGE);
-    console.log("Result: message_sent");
 
     return new Response(
       JSON.stringify({
