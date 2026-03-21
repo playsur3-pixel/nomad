@@ -1,5 +1,8 @@
 {
   "name": "nomad-goodnight-netlify",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "@netlify/blobs": "^10.7.4"
+  }
 }

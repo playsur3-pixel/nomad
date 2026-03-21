@@ -1,3 +1,5 @@
+import { getStore } from "@netlify/blobs";
+
 const DISCORD_API = "https://discord.com/api/v10";
 
 const GUILD_ID = process.env.DISCORD_GUILD_ID;
@@ -6,7 +8,10 @@ const TAVERNE_CHANNEL_ID = process.env.DISCORD_TAVERNE_CHANNEL_ID;
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 
 const GOODNIGHT_MESSAGE = "@everyone Bonne nuit tout le monde, à plus tard ! Bisous";
-const DUPLICATE_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+
+// Store persistant Netlify Blobs
+const store = getStore({ name: "nomad-goodnight", consistency: "strong" });
+const STATE_KEY = `voice-state-${TARGET_USER_ID}`;
 
 async function discordFetch(path, options = {}) {
   const url = `${DISCORD_API}${path}`;
@@ -48,17 +53,13 @@ async function getUserVoiceState() {
   try {
     return await discordFetch(`/guilds/${GUILD_ID}/voice-states/${TARGET_USER_ID}`);
   } catch (error) {
-    // L'utilisateur n'est pas en vocal
+    // 404 Unknown Voice State = l'utilisateur n'est pas en vocal
     if (error.status === 404 && error.data?.code === 10065) {
       console.log("User is not in voice");
       return null;
     }
     throw error;
   }
-}
-
-async function getRecentMessages(channelId, limit = 10) {
-  return discordFetch(`/channels/${channelId}/messages?limit=${limit}`);
 }
 
 async function sendMessage(channelId, content) {
@@ -71,18 +72,16 @@ async function sendMessage(channelId, content) {
   });
 }
 
-function hasRecentlyPostedSameMessage(messages) {
-  if (!Array.isArray(messages)) return false;
+async function readPreviousState() {
+  const raw = await store.get(STATE_KEY, { type: "json", consistency: "strong" });
+  if (!raw) {
+    return { inVoice: null, lastSentAt: null };
+  }
+  return raw;
+}
 
-  const now = Date.now();
-
-  return messages.some((msg) => {
-    if (msg.content !== GOODNIGHT_MESSAGE) return false;
-    if (!msg.author?.bot) return false;
-
-    const ts = new Date(msg.timestamp).getTime();
-    return now - ts <= DUPLICATE_WINDOW_MS;
-  });
+async function writeState(nextState) {
+  await store.setJSON(STATE_KEY, nextState);
 }
 
 export default async () => {
@@ -100,13 +99,24 @@ export default async () => {
       );
     }
 
-    const voiceState = await getUserVoiceState();
-    console.log("Voice state:", JSON.stringify(voiceState));
+    const previousState = await readPreviousState();
+    console.log("Previous state:", JSON.stringify(previousState));
 
+    const voiceState = await getUserVoiceState();
     const isInVoice = !!voiceState?.channel_id;
+
+    console.log("Current voice state:", JSON.stringify(voiceState));
     console.log("Is in voice:", isInVoice);
 
+    // Cas 1 : joueur actuellement en vocal
     if (isInVoice) {
+      await writeState({
+        inVoice: true,
+        lastSeenChannelId: voiceState.channel_id,
+        lastCheckedAt: new Date().toISOString(),
+        lastSentAt: previousState.lastSentAt ?? null,
+      });
+
       console.log("Result: target_still_in_voice");
       return new Response(
         JSON.stringify({
@@ -119,31 +129,43 @@ export default async () => {
       );
     }
 
-    const recentMessages = await getRecentMessages(TAVERNE_CHANNEL_ID, 10);
-    console.log(
-      "Recent messages fetched:",
-      Array.isArray(recentMessages) ? recentMessages.length : "not-array"
-    );
+    // Cas 2 : joueur hors vocal, mais il n'y était déjà pas au run précédent
+    if (previousState.inVoice !== true) {
+      await writeState({
+        inVoice: false,
+        lastSeenChannelId: previousState.lastSeenChannelId ?? null,
+        lastCheckedAt: new Date().toISOString(),
+        lastSentAt: previousState.lastSentAt ?? null,
+      });
 
-    if (hasRecentlyPostedSameMessage(recentMessages)) {
-      console.log("Result: duplicate_prevented");
+      console.log("Result: already_out_of_voice_no_send");
       return new Response(
         JSON.stringify({
           ok: true,
           action: "none",
-          reason: "duplicate_prevented",
+          reason: "already_out_of_voice_no_send",
         }),
         { status: 200 }
       );
     }
 
+    // Cas 3 : transition true -> false = il vient de quitter
     await sendMessage(TAVERNE_CHANNEL_ID, GOODNIGHT_MESSAGE);
-    console.log("Result: message_sent");
+
+    await writeState({
+      inVoice: false,
+      lastSeenChannelId: previousState.lastSeenChannelId ?? null,
+      lastCheckedAt: new Date().toISOString(),
+      lastSentAt: new Date().toISOString(),
+    });
+
+    console.log("Result: message_sent_once_after_leave");
 
     return new Response(
       JSON.stringify({
         ok: true,
         action: "message_sent",
+        reason: "message_sent_once_after_leave",
       }),
       { status: 200 }
     );
