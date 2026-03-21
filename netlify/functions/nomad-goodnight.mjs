@@ -1,45 +1,42 @@
 const DISCORD_API = "https://discord.com/api/v10";
 
+const GUILD_ID = process.env.DISCORD_GUILD_ID;
 const TARGET_USER_ID = "319045529373900800";
-const GOODNIGHT_MESSAGE = "@everyone Bonne nuit tout le monde, à plus tard ! Bisous";
-const DUPLICATE_WINDOW_MS = 15 * 60 * 1000;
+const TAVERNE_CHANNEL_ID = process.env.DISCORD_TAVERNE_CHANNEL_ID;
+const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 
-async function discordFetch(path, botToken, options = {}) {
-  const response = await fetch(`${DISCORD_API}${path}`, {
+const GOODNIGHT_MESSAGE = "@everyone Bonne nuit tout le monde, à plus tard ! Bisous";
+const DUPLICATE_WINDOW_MS = 10 * 60 * 1000;
+
+async function discordFetch(path, options = {}) {
+  const res = await fetch(`${DISCORD_API}${path}`, {
     ...options,
     headers: {
-      Authorization: `Bot ${botToken}`,
+      Authorization: `Bot ${BOT_TOKEN}`,
       "Content-Type": "application/json",
       ...(options.headers || {}),
     },
   });
 
-  const text = await response.text();
-  let json = null;
+  const text = await res.text();
 
-  try {
-    json = text ? JSON.parse(text) : null;
-  } catch {
-    json = null;
+  if (!res.ok) {
+    throw new Error(`Discord API ${res.status}: ${text}`);
   }
 
-  if (!response.ok) {
-    throw new Error(`Discord API ${response.status}: ${text}`);
-  }
-
-  return json;
+  return text ? JSON.parse(text) : null;
 }
 
-async function getGuildVoiceStates(guildId, botToken) {
-  return discordFetch(`/guilds/${guildId}/voice-states`, botToken);
+async function getGuildVoiceStates() {
+  return discordFetch(`/guilds/${GUILD_ID}/voice-states`);
 }
 
-async function getRecentMessages(channelId, botToken, limit = 10) {
-  return discordFetch(`/channels/${channelId}/messages?limit=${limit}`, botToken);
+async function getRecentMessages(channelId, limit = 10) {
+  return discordFetch(`/channels/${channelId}/messages?limit=${limit}`);
 }
 
-async function sendMessage(channelId, botToken, content) {
-  return discordFetch(`/channels/${channelId}/messages`, botToken, {
+async function sendMessage(channelId, content) {
+  return discordFetch(`/channels/${channelId}/messages`, {
     method: "POST",
     body: JSON.stringify({
       content,
@@ -51,44 +48,31 @@ async function sendMessage(channelId, botToken, content) {
 function hasRecentlyPostedSameMessage(messages) {
   const now = Date.now();
 
-  return Array.isArray(messages) && messages.some((message) => {
-    if (message?.content !== GOODNIGHT_MESSAGE) return false;
-    if (!message?.author?.bot) return false;
+  return messages.some((msg) => {
+    if (msg.content !== GOODNIGHT_MESSAGE) return false;
+    if (!msg.author?.bot) return false;
 
-    const timestamp = new Date(message.timestamp).getTime();
-    if (Number.isNaN(timestamp)) return false;
-
-    return now - timestamp <= DUPLICATE_WINDOW_MS;
+    const ts = new Date(msg.timestamp).getTime();
+    return now - ts <= DUPLICATE_WINDOW_MS;
   });
 }
 
 export default async () => {
-  const guildId = process.env.DISCORD_GUILD_ID;
-  const channelId = process.env.DISCORD_TAVERNE_CHANNEL_ID;
-  const botToken = process.env.DISCORD_BOT_TOKEN;
-
-  if (!guildId || !channelId || !botToken) {
-    return new Response(
-      JSON.stringify({
-        ok: false,
-        error: "Variables d'environnement manquantes",
-        required: [
-          "DISCORD_GUILD_ID",
-          "DISCORD_TAVERNE_CHANNEL_ID",
-          "DISCORD_BOT_TOKEN"
-        ]
-      }, null, 2),
-      { status: 500, headers: { "content-type": "application/json" } }
-    );
-  }
-
   try {
-    const voiceStates = await getGuildVoiceStates(guildId, botToken);
+    if (!BOT_TOKEN || !GUILD_ID || !TAVERNE_CHANNEL_ID) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "Variables d'environnement manquantes" }),
+        { status: 500 }
+      );
+    }
+
+    const voiceStates = await getGuildVoiceStates();
+
     const targetState = Array.isArray(voiceStates)
-      ? voiceStates.find((state) => String(state?.user_id) === TARGET_USER_ID)
+      ? voiceStates.find((vs) => String(vs.user_id) === TARGET_USER_ID)
       : null;
 
-    const isInVoice = Boolean(targetState?.channel_id);
+    const isInVoice = !!targetState?.channel_id;
 
     if (isInVoice) {
       return new Response(
@@ -96,14 +80,13 @@ export default async () => {
           ok: true,
           action: "none",
           reason: "target_still_in_voice",
-          targetUserId: TARGET_USER_ID,
-          channelId: targetState.channel_id,
-        }, null, 2),
-        { status: 200, headers: { "content-type": "application/json" } }
+          channel_id: targetState.channel_id,
+        }),
+        { status: 200 }
       );
     }
 
-    const recentMessages = await getRecentMessages(channelId, botToken, 10);
+    const recentMessages = await getRecentMessages(TAVERNE_CHANNEL_ID, 10);
 
     if (hasRecentlyPostedSameMessage(recentMessages)) {
       return new Response(
@@ -111,32 +94,31 @@ export default async () => {
           ok: true,
           action: "none",
           reason: "duplicate_prevented",
-        }, null, 2),
-        { status: 200, headers: { "content-type": "application/json" } }
+        }),
+        { status: 200 }
       );
     }
 
-    await sendMessage(channelId, botToken, GOODNIGHT_MESSAGE);
+    await sendMessage(TAVERNE_CHANNEL_ID, GOODNIGHT_MESSAGE);
 
     return new Response(
       JSON.stringify({
         ok: true,
         action: "message_sent",
-        targetUserId: TARGET_USER_ID,
-      }, null, 2),
-      { status: 200, headers: { "content-type": "application/json" } }
+      }),
+      { status: 200 }
     );
   } catch (error) {
     return new Response(
       JSON.stringify({
         ok: false,
-        error: error?.message || String(error),
-      }, null, 2),
-      { status: 500, headers: { "content-type": "application/json" } }
+        error: error.message,
+      }),
+      { status: 500 }
     );
   }
 };
 
 export const config = {
-  schedule: "*/1 * * * *"
+  schedule: "*/1 * * * *",
 };
