@@ -4,8 +4,9 @@ import { getStore } from "@netlify/blobs";
 const STEAM_NEWS_API =
   "https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/?appid=730&count=10&maxlength=20000&format=json";
 
-const DISCORD_EMBED_FIELD_LIMIT = 1024;
-const DISCORD_MAX_FIELDS = 25;
+const DISCORD_FIELD_SAFE_LIMIT = 900;
+const DISCORD_MAX_FIELDS_PER_EMBED = 23; // 25 max Discord, on garde Date + Source séparés
+const DISCORD_MAX_EMBEDS_PER_MESSAGE = 10;
 
 function decodeHtmlEntities(text = "") {
   return String(text)
@@ -71,7 +72,6 @@ function normalizeApiContents(input = "") {
     .trim();
 
   // Cas connu : l'API Steam renvoie cette update sans titres de sections.
-  // Les catégories existent sur la page Steam, mais pas dans le champ JSON `contents`.
   if (
     raw.includes("Cologne 2026 Major Shop") &&
     raw.includes("Storage Units deposit/retrieve UI")
@@ -144,14 +144,53 @@ function parsePatchSections(text = "") {
   return sections.filter((section) => section.lines.length > 0);
 }
 
-function splitTextForDiscordField(text, limit = DISCORD_EMBED_FIELD_LIMIT) {
-  if (text.length <= limit) return [text];
+function splitLongLineAtSentence(line, limit = DISCORD_FIELD_SAFE_LIMIT) {
+  if (line.length <= limit) return [line];
 
   const chunks = [];
-  const lines = text.split("\n");
+  let remaining = line;
+
+  while (remaining.length > limit) {
+    let splitIndex = remaining.lastIndexOf(". ", limit);
+
+    if (splitIndex < 100) {
+      splitIndex = remaining.lastIndexOf("; ", limit);
+    }
+
+    if (splitIndex < 100) {
+      splitIndex = remaining.lastIndexOf(", ", limit);
+    }
+
+    if (splitIndex < 100) {
+      splitIndex = remaining.lastIndexOf(" ", limit);
+    }
+
+    if (splitIndex < 100) {
+      splitIndex = limit;
+    }
+
+    const chunk = remaining.slice(0, splitIndex + 1).trim();
+    chunks.push(chunk);
+
+    remaining = remaining.slice(splitIndex + 1).trim();
+
+    if (remaining && !remaining.startsWith("•")) {
+      remaining = `• ${remaining}`;
+    }
+  }
+
+  if (remaining) chunks.push(remaining);
+
+  return chunks;
+}
+
+function splitLinesIntoSafeChunks(lines, limit = DISCORD_FIELD_SAFE_LIMIT) {
+  const chunks = [];
   let current = "";
 
-  for (const line of lines) {
+  const safeLines = lines.flatMap((line) => splitLongLineAtSentence(line, limit));
+
+  for (const line of safeLines) {
     const candidate = current ? `${current}\n${line}` : line;
 
     if (candidate.length <= limit) {
@@ -161,20 +200,14 @@ function splitTextForDiscordField(text, limit = DISCORD_EMBED_FIELD_LIMIT) {
 
     if (current) {
       chunks.push(current);
-      current = "";
     }
 
-    if (line.length <= limit) {
-      current = line;
-      continue;
-    }
-
-    for (let i = 0; i < line.length; i += limit - 20) {
-      chunks.push(`${line.slice(i, i + limit - 20)}...`);
-    }
+    current = line;
   }
 
-  if (current) chunks.push(current);
+  if (current) {
+    chunks.push(current);
+  }
 
   return chunks;
 }
@@ -183,18 +216,15 @@ function buildPatchFields(sections) {
   const fields = [];
 
   for (const section of sections) {
-    const value = section.lines.join("\n");
-    const chunks = splitTextForDiscordField(value);
+    const chunks = splitLinesIntoSafeChunks(section.lines, DISCORD_FIELD_SAFE_LIMIT);
 
-    for (let index = 0; index < chunks.length; index++) {
-      if (fields.length >= DISCORD_MAX_FIELDS - 2) break;
-
+    chunks.forEach((chunk, index) => {
       fields.push({
         name: index === 0 ? section.title : `${section.title} suite`,
-        value: chunks[index],
+        value: chunk,
         inline: false,
       });
-    }
+    });
   }
 
   return fields;
@@ -296,10 +326,52 @@ async function fetchLatestCs2Update() {
   };
 }
 
-function buildDiscordPayload(update) {
-  const fields = buildPatchFields(update.sections);
+function chunkFieldsIntoEmbeds(update) {
+  const patchFields = buildPatchFields(update.sections);
+  const embeds = [];
 
-  fields.push(
+  for (let i = 0; i < patchFields.length; i += DISCORD_MAX_FIELDS_PER_EMBED) {
+    const fieldChunk = patchFields.slice(i, i + DISCORD_MAX_FIELDS_PER_EMBED);
+    const partIndex = embeds.length + 1;
+
+    embeds.push({
+      title:
+        partIndex === 1
+          ? update.title
+          : `${update.title} — suite ${partIndex}`,
+      url: update.url,
+      color: 0xf5a623,
+      thumbnail:
+        partIndex === 1
+          ? {
+              url: "https://cdn.cloudflare.steamstatic.com/apps/csgo/images/csgo_react/social/cs2.jpg",
+            }
+          : undefined,
+      fields: fieldChunk,
+      footer: {
+        text: "Auto-post CS2 updates",
+      },
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  if (!embeds.length) {
+    embeds.push({
+      title: update.title,
+      url: update.url,
+      color: 0xf5a623,
+      description: "Aucune note lisible trouvée.",
+      footer: {
+        text: "Auto-post CS2 updates",
+      },
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  const lastEmbed = embeds[embeds.length - 1];
+
+  lastEmbed.fields = [
+    ...(lastEmbed.fields || []),
     {
       name: "Date",
       value: formatDate(update.date),
@@ -309,26 +381,23 @@ function buildDiscordPayload(update) {
       name: "Source",
       value: "Steam / Valve",
       inline: true,
-    }
-  );
+    },
+  ];
 
-  return {
-    embeds: [
-      {
-        title: update.title,
-        url: update.url,
-        color: 0xf5a623,
-        thumbnail: {
-          url: "https://cdn.cloudflare.steamstatic.com/apps/csgo/images/csgo_react/social/cs2.jpg",
-        },
-        fields,
-        footer: {
-          text: "Auto-post CS2 updates",
-        },
-        timestamp: new Date().toISOString(),
-      },
-    ],
-  };
+  return embeds;
+}
+
+function buildDiscordMessages(update) {
+  const embeds = chunkFieldsIntoEmbeds(update);
+  const messages = [];
+
+  for (let i = 0; i < embeds.length; i += DISCORD_MAX_EMBEDS_PER_MESSAGE) {
+    messages.push({
+      embeds: embeds.slice(i, i + DISCORD_MAX_EMBEDS_PER_MESSAGE),
+    });
+  }
+
+  return messages;
 }
 
 async function postToDiscord(update) {
@@ -338,19 +407,21 @@ async function postToDiscord(update) {
     throw new Error("Variable DISCORD_CS2_WEBHOOK_URL absente.");
   }
 
-  const payload = buildDiscordPayload(update);
+  const messages = buildDiscordMessages(update);
 
-  const response = await fetch(webhookUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
+  for (const payload of messages) {
+    const response = await fetch(webhookUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
 
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Discord webhook HTTP ${response.status}: ${text}`);
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Discord webhook HTTP ${response.status}: ${text}`);
+    }
   }
 }
 
