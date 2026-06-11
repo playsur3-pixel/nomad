@@ -7,7 +7,67 @@ const STEAM_NEWS_API =
 const DISCORD_EMBED_FIELD_LIMIT = 1024;
 const DISCORD_MAX_FIELDS = 25;
 
-function normalizeSteamText(input = "") {
+function decodeHtmlEntities(text = "") {
+  return String(text)
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+function normalizeSpaces(text = "") {
+  return String(text)
+    .replace(/\r/g, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function extractReadableHtml(html = "") {
+  const candidates = [
+    /<div[^>]*class=["'][^"']*announcement_body[^"']*["'][^>]*>([\s\S]*?)<\/div>/i,
+    /<div[^>]*class=["'][^"']*bodytext[^"']*["'][^>]*>([\s\S]*?)<\/div>/i,
+    /<div[^>]*class=["'][^"']*event_details[^"']*["'][^>]*>([\s\S]*?)<\/div>/i,
+    /<div[^>]*class=["'][^"']*partnereventdisplay_EventDetailsBody[^"']*["'][^>]*>([\s\S]*?)<\/div>/i,
+  ];
+
+  for (const pattern of candidates) {
+    const match = html.match(pattern);
+    if (match?.[1]) return match[1];
+  }
+
+  return html;
+}
+
+function htmlToPatchText(html = "") {
+  let text = extractReadableHtml(html);
+
+  text = text
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<p[^>]*>/gi, "")
+    .replace(/<\/div>/gi, "\n")
+    .replace(/<div[^>]*>/gi, "")
+    .replace(/<\/h[1-6]>/gi, "\n")
+    .replace(/<h[1-6][^>]*>/gi, "\n")
+    .replace(/<ul[^>]*>/gi, "\n")
+    .replace(/<\/ul>/gi, "\n")
+    .replace(/<ol[^>]*>/gi, "\n")
+    .replace(/<\/ol>/gi, "\n")
+    .replace(/<li[^>]*>/gi, "\n• ")
+    .replace(/<\/li>/gi, "")
+    .replace(/<[^>]+>/g, "");
+
+  return normalizeSpaces(decodeHtmlEntities(text));
+}
+
+function normalizeApiContents(input = "") {
   return String(input)
     .replace(/\r/g, "")
     .replace(/\\r\\n/g, "\n")
@@ -15,48 +75,31 @@ function normalizeSteamText(input = "") {
     .replace(/\\t/g, " ")
     .replace(/\\\[/g, "[")
     .replace(/\\\]/g, "]")
-    .replace(/\\\*/g, "\n• ")
-    .replace(/\\\\/g, "\\")
-    .trim();
-}
-
-function stripSteamMarkup(input = "") {
-  return normalizeSteamText(input)
-    .replace(/\[\/?b\]/gi, "**")
-    .replace(/\[\/?i\]/gi, "*")
-    .replace(/\[h1\](.*?)\[\/h1\]/gis, "\n**$1**\n")
-    .replace(/\[h2\](.*?)\[\/h2\]/gis, "\n**$1**\n")
-    .replace(/\[h3\](.*?)\[\/h3\]/gis, "\n**$1**\n")
-    .replace(/\[list\]/gi, "\n")
-    .replace(/\[\/list\]/gi, "\n")
-    .replace(/\[\*\]/g, "\n• ")
-    .replace(/^\s*\*\s+/gm, "• ")
-    .replace(/^\s*-\s+/gm, "• ")
-    .replace(/\[url=(.*?)\](.*?)\[\/url\]/gis, "$2 ($1)")
-    .replace(/\[\/?url\]/gi, "")
-    .replace(/\[img\].*?\[\/img\]/gis, "")
-    .replace(/\[previewyoutube=.*?\].*?\[\/previewyoutube\]/gis, "")
-    .replace(/\n[ \t]+/g, "\n")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-function normalizePatchLines(text = "") {
-  return text
-    .replace(/\[(.*?)\]/g, "\n[ $1 ]\n")
+    .replace(/\\\\/g, "\n\n")
+    .replace(/\\(?=[A-Z])/g, "\n• ")
     .replace(/([a-z0-9.,;:!?")\]])\.([A-Z])/g, "$1.\n• $2")
     .replace(/([^\n])• /g, "$1\n• ")
     .replace(/\n\s*•\s*/g, "\n• ")
-    .replace(/\[\s+/g, "[ ")
-    .replace(/\s+\]/g, " ]")
-    .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
-function parsePatchSections(contents = "") {
-  const text = normalizePatchLines(stripSteamMarkup(contents));
-  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+function cleanPatchText(text = "") {
+  return normalizeSpaces(
+    String(text)
+      .replace(/^\s*[-*]\s+/gm, "• ")
+      .replace(/^\s*•\s*/gm, "• ")
+      .replace(/\[\s+/g, "[ ")
+      .replace(/\s+\]/g, " ]")
+      .replace(/\n\s*\[\s*(.*?)\s*\]\s*\n/g, "\n[ $1 ]\n")
+  );
+}
+
+function parsePatchSections(text = "") {
+  const cleaned = cleanPatchText(text);
+  const lines = cleaned
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
 
   const sections = [];
   let current = null;
@@ -66,7 +109,7 @@ function parsePatchSections(contents = "") {
 
     if (sectionMatch) {
       current = {
-        title: `[ ${sectionMatch[1].trim()} ]`,
+        title: `[ ${sectionMatch[1].trim().toUpperCase()} ]`,
         lines: [],
       };
       sections.push(current);
@@ -81,11 +124,7 @@ function parsePatchSections(contents = "") {
       sections.push(current);
     }
 
-    if (line.startsWith("•")) {
-      current.lines.push(line);
-    } else {
-      current.lines.push(`• ${line}`);
-    }
+    current.lines.push(line.startsWith("•") ? line : `• ${line}`);
   }
 
   return sections.filter((section) => section.lines.length > 0);
@@ -133,15 +172,15 @@ function buildPatchFields(sections) {
     const value = section.lines.join("\n");
     const chunks = splitTextForDiscordField(value);
 
-    chunks.forEach((chunk, index) => {
-      if (fields.length >= DISCORD_MAX_FIELDS) return;
+    for (let index = 0; index < chunks.length; index++) {
+      if (fields.length >= DISCORD_MAX_FIELDS - 2) break;
 
       fields.push({
         name: index === 0 ? section.title : `${section.title} suite`,
-        value: chunk,
+        value: chunks[index],
         inline: false,
       });
-    });
+    }
   }
 
   return fields;
@@ -169,6 +208,21 @@ function getBlobStore() {
   });
 }
 
+async function fetchText(url) {
+  const response = await fetch(url, {
+    headers: {
+      "User-Agent": "REFACTO-CS2-Update-Watcher/1.0",
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTML update fetch HTTP ${response.status}`);
+  }
+
+  return response.text();
+}
+
 async function fetchLatestCs2Update() {
   const response = await fetch(STEAM_NEWS_API, {
     headers: {
@@ -192,12 +246,35 @@ async function fetchLatestCs2Update() {
     throw new Error("Aucune news Counter-Strike 2 Update trouvée.");
   }
 
+  let patchText = "";
+
+  try {
+    const html = await fetchText(update.url);
+    patchText = htmlToPatchText(html);
+  } catch (error) {
+    console.warn(`Fallback API contents utilisé : ${error.message}`);
+    patchText = normalizeApiContents(update.contents || "");
+  }
+
+  const sections = parsePatchSections(patchText);
+
+  if (!sections.length) {
+    const fallbackText = normalizeApiContents(update.contents || "");
+    return {
+      id: String(update.gid || update.date || update.title),
+      title: update.title || "Counter-Strike 2 Update",
+      url: update.url || "https://www.counter-strike.net/news/updates",
+      date: update.date,
+      sections: parsePatchSections(fallbackText),
+    };
+  }
+
   return {
     id: String(update.gid || update.date || update.title),
     title: update.title || "Counter-Strike 2 Update",
     url: update.url || "https://www.counter-strike.net/news/updates",
     date: update.date,
-    sections: parsePatchSections(update.contents || ""),
+    sections,
   };
 }
 
