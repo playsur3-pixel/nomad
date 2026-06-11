@@ -31,20 +31,24 @@ function normalizeSpaces(text = "") {
 function extractMetaContent(html = "", property = "") {
   const escapedProperty = property.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-  const patterns = [
-    new RegExp(
-      `<meta[^>]+property=["']${escapedProperty}["'][^>]+content=["']([^"']*)["'][^>]*>`,
-      "i"
-    ),
-    new RegExp(
-      `<meta[^>]+content=["']([^"']*)["'][^>]+property=["']${escapedProperty}["'][^>]*>`,
-      "i"
-    ),
-    new RegExp(
-      `<meta[^>]+name=["']${escapedProperty}["'][^>]+content=["']([^"']*)["'][^>]*>`,
-      "i"
-    ),
-  ];
+  const metaTags = html.match(/<meta\b[^>]*>/gi) || [];
+
+  for (const tag of metaTags) {
+    const hasWantedProperty =
+      new RegExp(`\\bproperty=(["'])${escapedProperty}\\1`, "i").test(tag) ||
+      new RegExp(`\\bname=(["'])${escapedProperty}\\1`, "i").test(tag);
+
+    if (!hasWantedProperty) continue;
+
+    const contentMatch = tag.match(/\bcontent=(["'])([\s\S]*?)\1/i);
+
+    if (contentMatch?.[2]) {
+      return decodeHtmlEntities(contentMatch[2]);
+    }
+  }
+
+  return "";
+}
 
   for (const pattern of patterns) {
     const match = html.match(pattern);
@@ -300,16 +304,19 @@ async function fetchLatestCs2Update() {
   }
 
   // Sécurité : ne jamais poster le menu Steam / footer / page complète.
-  if (
-    !patchText ||
-    patchText.includes("Sign in") ||
-    patchText.includes("Change language") ||
-    patchText.includes("Valve Corporation") ||
-    patchText.includes("Steam Subscriber Agreement") ||
-    patchText.length < 50
-  ) {
-    patchText = normalizeApiContents(update.contents || "");
-  }
+ const apiPatchText = normalizeApiContents(update.contents || "");
+
+if (
+  !patchText ||
+  patchText.includes("Sign in") ||
+  patchText.includes("Change language") ||
+  patchText.includes("Valve Corporation") ||
+  patchText.includes("Steam Subscriber Agreement") ||
+  patchText.length < 50 ||
+  apiPatchText.length > patchText.length + 80
+) {
+  patchText = apiPatchText;
+}
 
   let sections = parsePatchSections(patchText);
 
