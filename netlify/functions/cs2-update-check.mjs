@@ -76,7 +76,7 @@ async function postToDiscord(update) {
   }
 
   const payload = {
-    username: "CS2 Update",
+    username: "Mise à jour CS2",
     avatar_url:
       "https://cdn.cloudflare.steamstatic.com/apps/csgo/images/csgo_react/social/cs2.jpg",
     embeds: [
