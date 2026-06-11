@@ -7,33 +7,60 @@ const STEAM_NEWS_API =
 function stripBBCode(input = "") {
   return input
     .replace(/\r/g, "")
+    .replace(/\\n/g, "\n")
     .replace(/\[\/?b\]/gi, "**")
     .replace(/\[\/?i\]/gi, "*")
-    .replace(/\[h1\](.*?)\[\/h1\]/gis, "**$1**\n")
-    .replace(/\[h2\](.*?)\[\/h2\]/gis, "**$1**\n")
-    .replace(/\[h3\](.*?)\[\/h3\]/gis, "**$1**\n")
-    .replace(/\[list\]/gi, "")
-    .replace(/\[\/list\]/gi, "")
-    .replace(/\[\*\]/g, "• ")
+    .replace(/\[h1\](.*?)\[\/h1\]/gis, "\n**$1**\n")
+    .replace(/\[h2\](.*?)\[\/h2\]/gis, "\n**$1**\n")
+    .replace(/\[h3\](.*?)\[\/h3\]/gis, "\n**$1**\n")
+    .replace(/\[list\]/gi, "\n")
+    .replace(/\[\/list\]/gi, "\n")
+    .replace(/\[\*\]/g, "\n• ")
     .replace(/\[url=(.*?)\](.*?)\[\/url\]/gis, "$2 ($1)")
     .replace(/\[\/?url\]/gi, "")
     .replace(/\[img\].*?\[\/img\]/gis, "")
     .replace(/\[previewyoutube=.*?\].*?\[\/previewyoutube\]/gis, "")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function formatCs2PatchNotes(text = "") {
+  return text
+    .replace(/^\s*\\?\[(.*?)\]\s*$/gm, "\n**[ $1 ]**")
+    .replace(/([^\n])• /g, "$1\n• ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
 function truncateDiscord(text, max = 3500) {
-  if (!text || text.length <= max) return text;
-  return `${text.slice(0, max - 20).trim()}\n\n...`;
+  if (!text) return "";
+  if (text.length <= max) return text;
+
+  return `${text.slice(0, max - 40).trim()}\n\n...`;
 }
 
 function formatDate(unixSeconds) {
+  if (!unixSeconds) return "Non précisée";
+
   return new Intl.DateTimeFormat("fr-FR", {
     dateStyle: "long",
     timeStyle: "short",
     timeZone: "Europe/Paris",
   }).format(new Date(unixSeconds * 1000));
+}
+
+function getBlobStore() {
+  if (!process.env.NETLIFY_SITE_ID || !process.env.NETLIFY_AUTH_TOKEN) {
+    throw new Error("Variables NETLIFY_SITE_ID ou NETLIFY_AUTH_TOKEN absentes.");
+  }
+
+  return getStore({
+    name: "cs2-update-watcher",
+    siteID: process.env.NETLIFY_SITE_ID,
+    token: process.env.NETLIFY_AUTH_TOKEN,
+  });
 }
 
 async function fetchLatestCs2Update() {
@@ -59,12 +86,14 @@ async function fetchLatestCs2Update() {
     throw new Error("Aucune news Counter-Strike 2 Update trouvée.");
   }
 
+  const cleanedContents = formatCs2PatchNotes(stripBBCode(update.contents || ""));
+
   return {
     id: String(update.gid || update.date || update.title),
     title: update.title || "Counter-Strike 2 Update",
     url: update.url || "https://www.counter-strike.net/news/updates",
     date: update.date,
-    contents: stripBBCode(update.contents || ""),
+    contents: cleanedContents,
   };
 }
 
@@ -76,9 +105,6 @@ async function postToDiscord(update) {
   }
 
   const payload = {
-    username: "Mise à jour CS2",
-    avatar_url:
-      "https://cdn.cloudflare.steamstatic.com/apps/csgo/images/csgo_react/social/cs2.jpg",
     embeds: [
       {
         title: update.title,
@@ -88,7 +114,7 @@ async function postToDiscord(update) {
         fields: [
           {
             name: "Date",
-            value: update.date ? formatDate(update.date) : "Non précisée",
+            value: formatDate(update.date),
             inline: true,
           },
           {
@@ -117,18 +143,6 @@ async function postToDiscord(update) {
     const text = await response.text();
     throw new Error(`Discord webhook HTTP ${response.status}: ${text}`);
   }
-}
-
-function getBlobStore() {
-  if (!process.env.NETLIFY_SITE_ID || !process.env.NETLIFY_AUTH_TOKEN) {
-    throw new Error("Variables NETLIFY_SITE_ID ou NETLIFY_AUTH_TOKEN absentes.");
-  }
-
-  return getStore({
-    name: "cs2-update-watcher",
-    siteID: process.env.NETLIFY_SITE_ID,
-    token: process.env.NETLIFY_AUTH_TOKEN,
-  });
 }
 
 async function runCheck({ force = false } = {}) {
