@@ -5,7 +5,7 @@ const STEAM_NEWS_API =
   "https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/?appid=730&count=10&maxlength=20000&format=json";
 
 const DISCORD_FIELD_SAFE_LIMIT = 900;
-const DISCORD_MAX_FIELDS_PER_EMBED = 23; // 25 max Discord, on garde Date + Source séparés
+const DISCORD_MAX_FIELDS_PER_EMBED = 23; // Discord max = 25 fields. On garde 2 fields pour Date + Source.
 const DISCORD_MAX_EMBEDS_PER_MESSAGE = 10;
 
 function decodeHtmlEntities(text = "") {
@@ -30,7 +30,6 @@ function normalizeSpaces(text = "") {
 
 function extractMetaContent(html = "", property = "") {
   const escapedProperty = property.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
   const metaTags = html.match(/<meta\b[^>]*>/gi) || [];
 
   for (const tag of metaTags) {
@@ -40,19 +39,13 @@ function extractMetaContent(html = "", property = "") {
 
     if (!hasWantedProperty) continue;
 
+    // Important : on lit jusqu'au même quote que celui qui ouvre content.
+    // Donc "user's inventory" ne coupe plus le texte.
     const contentMatch = tag.match(/\bcontent=(["'])([\s\S]*?)\1/i);
 
     if (contentMatch?.[2]) {
       return decodeHtmlEntities(contentMatch[2]);
     }
-  }
-
-  return "";
-}
-
-  for (const pattern of patterns) {
-    const match = html.match(pattern);
-    if (match?.[1]) return decodeHtmlEntities(match[1]);
   }
 
   return "";
@@ -76,6 +69,7 @@ function normalizeApiContents(input = "") {
     .trim();
 
   // Cas connu : l'API Steam renvoie cette update sans titres de sections.
+  // Le JSON contient les notes, mais pas [ COLOGNE 2026 ] ni [ MISC ].
   if (
     raw.includes("Cologne 2026 Major Shop") &&
     raw.includes("Storage Units deposit/retrieve UI")
@@ -157,21 +151,10 @@ function splitLongLineAtSentence(line, limit = DISCORD_FIELD_SAFE_LIMIT) {
   while (remaining.length > limit) {
     let splitIndex = remaining.lastIndexOf(". ", limit);
 
-    if (splitIndex < 100) {
-      splitIndex = remaining.lastIndexOf("; ", limit);
-    }
-
-    if (splitIndex < 100) {
-      splitIndex = remaining.lastIndexOf(", ", limit);
-    }
-
-    if (splitIndex < 100) {
-      splitIndex = remaining.lastIndexOf(" ", limit);
-    }
-
-    if (splitIndex < 100) {
-      splitIndex = limit;
-    }
+    if (splitIndex < 100) splitIndex = remaining.lastIndexOf("; ", limit);
+    if (splitIndex < 100) splitIndex = remaining.lastIndexOf(", ", limit);
+    if (splitIndex < 100) splitIndex = remaining.lastIndexOf(" ", limit);
+    if (splitIndex < 100) splitIndex = limit;
 
     const chunk = remaining.slice(0, splitIndex + 1).trim();
     chunks.push(chunk);
@@ -202,16 +185,12 @@ function splitLinesIntoSafeChunks(lines, limit = DISCORD_FIELD_SAFE_LIMIT) {
       continue;
     }
 
-    if (current) {
-      chunks.push(current);
-    }
+    if (current) chunks.push(current);
 
     current = line;
   }
 
-  if (current) {
-    chunks.push(current);
-  }
+  if (current) chunks.push(current);
 
   return chunks;
 }
@@ -294,6 +273,7 @@ async function fetchLatestCs2Update() {
     throw new Error("Aucune news Counter-Strike 2 Update trouvée.");
   }
 
+  const apiPatchText = normalizeApiContents(update.contents || "");
   let patchText = "";
 
   try {
@@ -304,24 +284,24 @@ async function fetchLatestCs2Update() {
   }
 
   // Sécurité : ne jamais poster le menu Steam / footer / page complète.
- const apiPatchText = normalizeApiContents(update.contents || "");
-
-if (
-  !patchText ||
-  patchText.includes("Sign in") ||
-  patchText.includes("Change language") ||
-  patchText.includes("Valve Corporation") ||
-  patchText.includes("Steam Subscriber Agreement") ||
-  patchText.length < 50 ||
-  apiPatchText.length > patchText.length + 80
-) {
-  patchText = apiPatchText;
-}
+  // Si le HTML est vide, pollué ou plus court que l'API à cause d'une extraction cassée,
+  // on retombe sur le contenu API.
+  if (
+    !patchText ||
+    patchText.includes("Sign in") ||
+    patchText.includes("Change language") ||
+    patchText.includes("Valve Corporation") ||
+    patchText.includes("Steam Subscriber Agreement") ||
+    patchText.length < 50 ||
+    apiPatchText.length > patchText.length + 80
+  ) {
+    patchText = apiPatchText;
+  }
 
   let sections = parsePatchSections(patchText);
 
   if (!sections.length) {
-    sections = parsePatchSections(normalizeApiContents(update.contents || ""));
+    sections = parsePatchSections(apiPatchText);
   }
 
   return {
