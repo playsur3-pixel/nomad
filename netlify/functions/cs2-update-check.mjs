@@ -27,54 +27,68 @@ function normalizeSpaces(text = "") {
     .trim();
 }
 
-function extractReadableHtml(html = "") {
-  const candidates = [
-    /<div[^>]*class=["'][^"']*announcement_body[^"']*["'][^>]*>([\s\S]*?)<\/div>/i,
-    /<div[^>]*class=["'][^"']*bodytext[^"']*["'][^>]*>([\s\S]*?)<\/div>/i,
-    /<div[^>]*class=["'][^"']*event_details[^"']*["'][^>]*>([\s\S]*?)<\/div>/i,
-    /<div[^>]*class=["'][^"']*partnereventdisplay_EventDetailsBody[^"']*["'][^>]*>([\s\S]*?)<\/div>/i,
+function extractMetaContent(html = "", property = "") {
+  const escapedProperty = property.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  const patterns = [
+    new RegExp(
+      `<meta[^>]+property=["']${escapedProperty}["'][^>]+content=["']([^"']*)["'][^>]*>`,
+      "i"
+    ),
+    new RegExp(
+      `<meta[^>]+content=["']([^"']*)["'][^>]+property=["']${escapedProperty}["'][^>]*>`,
+      "i"
+    ),
+    new RegExp(
+      `<meta[^>]+name=["']${escapedProperty}["'][^>]+content=["']([^"']*)["'][^>]*>`,
+      "i"
+    ),
   ];
 
-  for (const pattern of candidates) {
+  for (const pattern of patterns) {
     const match = html.match(pattern);
-    if (match?.[1]) return match[1];
+    if (match?.[1]) return decodeHtmlEntities(match[1]);
   }
 
-  return html;
+  return "";
 }
 
 function htmlToPatchText(html = "") {
-  let text = extractReadableHtml(html);
+  const description =
+    extractMetaContent(html, "og:description") ||
+    extractMetaContent(html, "description") ||
+    "";
 
-  text = text
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[\s\S]*?<\/style>/gi, "")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/p>/gi, "\n")
-    .replace(/<p[^>]*>/gi, "")
-    .replace(/<\/div>/gi, "\n")
-    .replace(/<div[^>]*>/gi, "")
-    .replace(/<\/h[1-6]>/gi, "\n")
-    .replace(/<h[1-6][^>]*>/gi, "\n")
-    .replace(/<ul[^>]*>/gi, "\n")
-    .replace(/<\/ul>/gi, "\n")
-    .replace(/<ol[^>]*>/gi, "\n")
-    .replace(/<\/ol>/gi, "\n")
-    .replace(/<li[^>]*>/gi, "\n• ")
-    .replace(/<\/li>/gi, "")
-    .replace(/<[^>]+>/g, "");
-
-  return normalizeSpaces(decodeHtmlEntities(text));
+  return normalizeSpaces(description);
 }
 
 function normalizeApiContents(input = "") {
-  return String(input)
+  const raw = String(input)
     .replace(/\r/g, "")
     .replace(/\\r\\n/g, "\n")
     .replace(/\\n/g, "\n")
     .replace(/\\t/g, " ")
-    .replace(/\\\[/g, "[")
-    .replace(/\\\]/g, "]")
+    .trim();
+
+  // Cas connu : l'API Steam renvoie cette update sans titres de sections.
+  // Les catégories existent sur la page Steam, mais pas dans le champ JSON `contents`.
+  if (
+    raw.includes("Cologne 2026 Major Shop") &&
+    raw.includes("Storage Units deposit/retrieve UI")
+  ) {
+    return `[ COLOGNE 2026 ]
+
+• Added display of lowest and highest sticker price in the last 7 days in the Cologne 2026 Major Shop.
+• Added stickers showcase to the Cologne 2026 Major Hub tile on the main menu.
+
+[ MISC ]
+
+• Added multi-select functionality in Storage Units deposit/retrieve UI.
+• Added appropriate error message when user's inventory is full and they try to redeem Weekly Care Package rewards, Armory items, or items in the Major Shop cart.
+• Fixed number wrapping rules in some languages.`;
+  }
+
+  return raw
     .replace(/\\\\/g, "\n\n")
     .replace(/\\(?=[A-Z])/g, "\n• ")
     .replace(/([a-z0-9.,;:!?")\]])\.([A-Z])/g, "$1.\n• $2")
@@ -253,20 +267,24 @@ async function fetchLatestCs2Update() {
     patchText = htmlToPatchText(html);
   } catch (error) {
     console.warn(`Fallback API contents utilisé : ${error.message}`);
+  }
+
+  // Sécurité : ne jamais poster le menu Steam / footer / page complète.
+  if (
+    !patchText ||
+    patchText.includes("Sign in") ||
+    patchText.includes("Change language") ||
+    patchText.includes("Valve Corporation") ||
+    patchText.includes("Steam Subscriber Agreement") ||
+    patchText.length < 50
+  ) {
     patchText = normalizeApiContents(update.contents || "");
   }
 
-  const sections = parsePatchSections(patchText);
+  let sections = parsePatchSections(patchText);
 
   if (!sections.length) {
-    const fallbackText = normalizeApiContents(update.contents || "");
-    return {
-      id: String(update.gid || update.date || update.title),
-      title: update.title || "Counter-Strike 2 Update",
-      url: update.url || "https://www.counter-strike.net/news/updates",
-      date: update.date,
-      sections: parsePatchSections(fallbackText),
-    };
+    sections = parsePatchSections(normalizeApiContents(update.contents || ""));
   }
 
   return {
