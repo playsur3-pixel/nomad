@@ -4,10 +4,20 @@ import { getStore } from "@netlify/blobs";
 const STEAM_NEWS_API =
   "https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/?appid=730&count=10&maxlength=12000&format=json";
 
-function stripBBCode(input = "") {
-  return input
+function normalizeSteamText(input = "") {
+  return String(input)
     .replace(/\r/g, "")
+    .replace(/\\r\\n/g, "\n")
     .replace(/\\n/g, "\n")
+    .replace(/\\t/g, " ")
+    .replace(/\\\[/g, "[")
+    .replace(/\\\]/g, "]")
+    .replace(/\\\\/g, "\\")
+    .trim();
+}
+
+function stripBBCode(input = "") {
+  return normalizeSteamText(input)
     .replace(/\[\/?b\]/gi, "**")
     .replace(/\[\/?i\]/gi, "*")
     .replace(/\[h1\](.*?)\[\/h1\]/gis, "\n**$1**\n")
@@ -27,11 +37,18 @@ function stripBBCode(input = "") {
 }
 
 function formatCs2PatchNotes(text = "") {
-  return text
-    .replace(/^\s*\\?\[(.*?)\]\s*$/gm, "\n**[ $1 ]**")
+  let output = text.trim();
+
+  output = output
+    .replace(/^\s*\\?\[\s*(.*?)\s*\]\s*$/gm, "\n**[ $1 ]**")
+    .replace(/\\(?=[A-Z])/g, "\n• ")
+    .replace(/([a-z0-9.,;:!?")\]])\.([A-Z])/g, "$1.\n• $2")
     .replace(/([^\n])• /g, "$1\n• ")
+    .replace(/\n\s*•\s*/g, "\n• ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+
+  return output;
 }
 
 function truncateDiscord(text, max = 3500) {
