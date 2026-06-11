@@ -2,7 +2,10 @@ import { schedule } from "@netlify/functions";
 import { getStore } from "@netlify/blobs";
 
 const STEAM_NEWS_API =
-  "https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/?appid=730&count=10&maxlength=12000&format=json";
+  "https://api.steampowered.com/ISteamNews/GetNewsForApp/v2/?appid=730&count=10&maxlength=20000&format=json";
+
+const DISCORD_EMBED_FIELD_LIMIT = 1024;
+const DISCORD_MAX_FIELDS = 25;
 
 function normalizeSteamText(input = "") {
   return String(input)
@@ -12,11 +15,12 @@ function normalizeSteamText(input = "") {
     .replace(/\\t/g, " ")
     .replace(/\\\[/g, "[")
     .replace(/\\\]/g, "]")
+    .replace(/\\\*/g, "\n• ")
     .replace(/\\\\/g, "\\")
     .trim();
 }
 
-function stripBBCode(input = "") {
+function stripSteamMarkup(input = "") {
   return normalizeSteamText(input)
     .replace(/\[\/?b\]/gi, "**")
     .replace(/\[\/?i\]/gi, "*")
@@ -26,6 +30,8 @@ function stripBBCode(input = "") {
     .replace(/\[list\]/gi, "\n")
     .replace(/\[\/list\]/gi, "\n")
     .replace(/\[\*\]/g, "\n• ")
+    .replace(/^\s*\*\s+/gm, "• ")
+    .replace(/^\s*-\s+/gm, "• ")
     .replace(/\[url=(.*?)\](.*?)\[\/url\]/gis, "$2 ($1)")
     .replace(/\[\/?url\]/gi, "")
     .replace(/\[img\].*?\[\/img\]/gis, "")
@@ -36,26 +42,109 @@ function stripBBCode(input = "") {
     .trim();
 }
 
-function formatCs2PatchNotes(text = "") {
-  let output = text.trim();
-
-  output = output
-    .replace(/^\s*\\?\[\s*(.*?)\s*\]\s*$/gm, "\n**[ $1 ]**")
-    .replace(/\\(?=[A-Z])/g, "\n• ")
+function normalizePatchLines(text = "") {
+  return text
+    .replace(/\[(.*?)\]/g, "\n[ $1 ]\n")
     .replace(/([a-z0-9.,;:!?")\]])\.([A-Z])/g, "$1.\n• $2")
     .replace(/([^\n])• /g, "$1\n• ")
     .replace(/\n\s*•\s*/g, "\n• ")
+    .replace(/\[\s+/g, "[ ")
+    .replace(/\s+\]/g, " ]")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-
-  return output;
 }
 
-function truncateDiscord(text, max = 3500) {
-  if (!text) return "";
-  if (text.length <= max) return text;
+function parsePatchSections(contents = "") {
+  const text = normalizePatchLines(stripSteamMarkup(contents));
+  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
 
-  return `${text.slice(0, max - 40).trim()}\n\n...`;
+  const sections = [];
+  let current = null;
+
+  for (const line of lines) {
+    const sectionMatch = line.match(/^\[\s*(.*?)\s*\]$/);
+
+    if (sectionMatch) {
+      current = {
+        title: `[ ${sectionMatch[1].trim()} ]`,
+        lines: [],
+      };
+      sections.push(current);
+      continue;
+    }
+
+    if (!current) {
+      current = {
+        title: "Notes",
+        lines: [],
+      };
+      sections.push(current);
+    }
+
+    if (line.startsWith("•")) {
+      current.lines.push(line);
+    } else {
+      current.lines.push(`• ${line}`);
+    }
+  }
+
+  return sections.filter((section) => section.lines.length > 0);
+}
+
+function splitTextForDiscordField(text, limit = DISCORD_EMBED_FIELD_LIMIT) {
+  if (text.length <= limit) return [text];
+
+  const chunks = [];
+  const lines = text.split("\n");
+  let current = "";
+
+  for (const line of lines) {
+    const candidate = current ? `${current}\n${line}` : line;
+
+    if (candidate.length <= limit) {
+      current = candidate;
+      continue;
+    }
+
+    if (current) {
+      chunks.push(current);
+      current = "";
+    }
+
+    if (line.length <= limit) {
+      current = line;
+      continue;
+    }
+
+    for (let i = 0; i < line.length; i += limit - 20) {
+      chunks.push(`${line.slice(i, i + limit - 20)}...`);
+    }
+  }
+
+  if (current) chunks.push(current);
+
+  return chunks;
+}
+
+function buildPatchFields(sections) {
+  const fields = [];
+
+  for (const section of sections) {
+    const value = section.lines.join("\n");
+    const chunks = splitTextForDiscordField(value);
+
+    chunks.forEach((chunk, index) => {
+      if (fields.length >= DISCORD_MAX_FIELDS) return;
+
+      fields.push({
+        name: index === 0 ? section.title : `${section.title} suite`,
+        value: chunk,
+        inline: false,
+      });
+    });
+  }
+
+  return fields;
 }
 
 function formatDate(unixSeconds) {
@@ -103,14 +192,47 @@ async function fetchLatestCs2Update() {
     throw new Error("Aucune news Counter-Strike 2 Update trouvée.");
   }
 
-  const cleanedContents = formatCs2PatchNotes(stripBBCode(update.contents || ""));
-
   return {
     id: String(update.gid || update.date || update.title),
     title: update.title || "Counter-Strike 2 Update",
     url: update.url || "https://www.counter-strike.net/news/updates",
     date: update.date,
-    contents: cleanedContents,
+    sections: parsePatchSections(update.contents || ""),
+  };
+}
+
+function buildDiscordPayload(update) {
+  const fields = buildPatchFields(update.sections);
+
+  fields.push(
+    {
+      name: "Date",
+      value: formatDate(update.date),
+      inline: true,
+    },
+    {
+      name: "Source",
+      value: "Steam / Valve",
+      inline: true,
+    }
+  );
+
+  return {
+    embeds: [
+      {
+        title: update.title,
+        url: update.url,
+        color: 0xf5a623,
+        thumbnail: {
+          url: "https://cdn.cloudflare.steamstatic.com/apps/csgo/images/csgo_react/social/cs2.jpg",
+        },
+        fields,
+        footer: {
+          text: "Auto-post CS2 updates",
+        },
+        timestamp: new Date().toISOString(),
+      },
+    ],
   };
 }
 
@@ -121,32 +243,7 @@ async function postToDiscord(update) {
     throw new Error("Variable DISCORD_CS2_WEBHOOK_URL absente.");
   }
 
-  const payload = {
-    embeds: [
-      {
-        title: update.title,
-        url: update.url,
-        color: 0xf5a623,
-        description: truncateDiscord(update.contents, 3500),
-        fields: [
-          {
-            name: "Date",
-            value: formatDate(update.date),
-            inline: true,
-          },
-          {
-            name: "Source",
-            value: "Steam / Valve",
-            inline: true,
-          },
-        ],
-        footer: {
-          text: "Auto-post CS2 updates",
-        },
-        timestamp: new Date().toISOString(),
-      },
-    ],
-  };
+  const payload = buildDiscordPayload(update);
 
   const response = await fetch(webhookUrl, {
     method: "POST",
