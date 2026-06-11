@@ -119,8 +119,20 @@ async function postToDiscord(update) {
   }
 }
 
+function getBlobStore() {
+  if (!process.env.NETLIFY_SITE_ID || !process.env.NETLIFY_AUTH_TOKEN) {
+    throw new Error("Variables NETLIFY_SITE_ID ou NETLIFY_AUTH_TOKEN absentes.");
+  }
+
+  return getStore({
+    name: "cs2-update-watcher",
+    siteID: process.env.NETLIFY_SITE_ID,
+    token: process.env.NETLIFY_AUTH_TOKEN,
+  });
+}
+
 async function runCheck({ force = false } = {}) {
-  const store = getStore("cs2-update-watcher");
+  const store = getBlobStore();
 
   const latest = await fetchLatestCs2Update();
   const lastPostedId = await store.get("last-posted-id", { type: "text" });
@@ -143,7 +155,7 @@ async function runCheck({ force = false } = {}) {
   };
 }
 
-async function manualHandler(event) {
+async function handler(event) {
   try {
     const force = event.queryStringParameters?.force === "1";
     const result = await runCheck({ force });
@@ -175,6 +187,6 @@ async function manualHandler(event) {
   }
 }
 
-const scheduledHandler = schedule("*/15 * * * *", manualHandler);
+const scheduledHandler = schedule("*/15 * * * *", handler);
 
 export { scheduledHandler as handler };
